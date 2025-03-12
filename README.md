@@ -1,2 +1,2 @@
 ### Bulk-RNA-sequencing
-This is where all the bulk-RNA-sequencing data in R will be uploaded.
+This is where all the bulk-RNA-sequencing data analysis in R will be uploaded.
