@@ -31,5 +31,3 @@
 ./pre-clinical-data
 ./clinical-data
 
-# Ignore html files.
-*.html
