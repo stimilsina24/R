@@ -1,0 +1,290 @@
+---
+title: "Bulk RNA-seq analysis- Part 1 (DESeq2)"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+This analysis was based on tutorials from Sanbomics and other people, using a dataset from a published study-NCBI accession GSE171663 (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE171663). The authors studied the gene expression changes in Vascular Smooth muscle cells in response to Replicative Senescence.
+
+In this part of the analysis, we will perform DESeq2 based bulk RNA-seq analysis and Quality Control. We will also generate a list of Differentially expressed genes and visualize the data(Volcano plot and Heatmap).
+
+---
+
+##### Prerequisites - Alignment and Read counts generation:
+
+```{bash}
+#Prior steps for genome index creation, alignment, feature counts were performed in linux with STAR and SubRead.
+#counts.out gene counts table was generated, edited, then saved as comma delimited csv.
+```
+
+---
+
+##### 1. Install and load the necessary libraries
+
+```{r}
+#install.packages("BiocManager")
+#library(BiocManager)
+#BiocManager::install("DESeq2")
+#BiocManager::install("apeglm")
+#BiocManager::install("tidyverse") # includes ggplot2 and dplyr
+#BiocManager::install("EnhancedVolcano")
+#install.packages("plotly")
+#BiocManager::install("ComplexHeatmap") #alternative = pheatmap
+#BiocManager::install( "AnnotationDbi" )
+#install.packages("devtools")
+#install.packages("Rtools")
+#BiocManager::install("EnsDb.Hsapiens.v86")
+
+```
+
+```{r, message = FALSE}
+library(DESeq2)
+library(tidyverse) # includes ggplot2 and dplyr
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(EnsDb.Hsapiens.v86)
+library(devtools)
+library(RColorBrewer)
+library(apeglm)
+library(EnhancedVolcano)
+library(plotly)
+library(ComplexHeatmap)
+#library(cowplot)
+
+```
+
+---
+
+##### 2. Import counts file then filtering low counts
+```{r, echo = TRUE}
+#Create paths for your directories
+input <- paste0(getwd(), "/Input/") 
+output <- paste0(getwd(), "/Results/")
+QC <- paste0(getwd(), "/QC/") # For quality control figures in DESeq2
+out_figs <- paste0(output, "/Figures/")
+
+#print items in your folder using R
+dir()
+
+#load counts table into R
+
+Counts <- read.delim(paste0(input, "counts.csv"), header = TRUE, row.names = 1, sep = ",")
+
+#View the table
+Counts
+
+# Filter out low counts and view it
+Counts <- Counts[which(rowSums(Counts) > 50),]
+Counts
+```
+---
+
+##### 3. Create metadata, define groups & comparisons, and perform DESeq analysis
+```{r}
+#define the groups as factor and set ref as Control
+condition <- factor(c("C", "C", "C", "C", "S", "S", "S", "S")) # C = Ctrl, S = Senescent
+relevel(condition, ref = "C") # Ctrl as reference sample
+
+#create the metadata using column names of Counts and condition
+metadata <- data.frame(colnames(Counts), condition)
+metadata
+metadata <- rename(metadata, c(samples = colnames.Counts.)) %>% column_to_rownames(var = "samples") #rename column title for samples
+metadata 
+
+#Create DESeq object 
+dds <- DESeqDataSetFromMatrix(countData = Counts, colData = metadata, design = ~condition)
+
+#Run DESeq analysis on the DESeq object
+dds <- DESeq(dds)
+```
+---
+
+##### 4a. Quality Control plots for Normalization and Variance Stabilization
+```{r}
+#All quality control plots
+#If you didn't run DESeq(dds) yet then you need to do estimateSizeFactors(prior to this step)
+#Normalize count data, size factor normalization
+norm_counts <- counts(dds, normalized = TRUE)
+
+#(norm_counts, file = paste0(output, "norm_counts.csv")) #Save normalized counts file
+# Log transformation for variance stabilization
+rld <- rlog(dds)
+head(assay(rld))
+
+#vst transformation of data for PCA or sample correlation matrix
+vsd_data<- vst(dds, blind = TRUE)
+head(assay(vsd_data))
+
+#For Mean vs Variance plot
+mean_counts <- apply(Counts[, 1:8], 1, mean)
+variance_counts <- apply(Counts[, 1:8], 1, var)
+df<- data.frame(mean_counts,variance_counts)
+
+#Graph and save QC plots in 1 file
+#pdf(file = paste0(QC, "QC_plots.pdf"), width = 10, height = 7) #higher resolution with a pdf
+
+par(mfrow = c(2,2))
+#Dispersion estimate... QC... The red line should go below 1..
+plot(df$mean_counts, df$variance_counts, log = "xy",  xlab = "mean_counts", ylab = "variance_counts", main = "mean vs variance")
+
+plotDispEsts(dds, main = "Dispersion Estimates") #Dispersion
+
+boxplot(log2( assay(dds) + 1), main = "Before normalization") #Counts before normalization
+
+boxplot(log2( norm_counts + 1), main = "After normalization")#Counts after normalization
+
+plot(log2( norm_counts + 1), col = rgb(0,0,0,.2), pch = 16, cex = 0.3, main = "Before variance stabilization") #Without variance stabilization 
+
+plot(assay(rld), col = rgb(0,0,0,.2), pch = 16, cex = 0.3, main = "Variance Stabilization(rlog)") #With RLD variance stabilization...seems to be better for low count genes
+
+plot(assay(vsd_data), col = rgb(0,0,0,.2), pch = 16, cex = 0.3, main = "Variance Stabilization(vst)") # With VST variance stabilization
+
+print(last_plot())
+#dev.off()
+
+dev.set(dev.next()) # If dev.off doesn't work
+
+
+```
+---
+
+##### 4b- PCA, sample correlation heatmap
+```{r}
+# Extract the matrix of transformed normalized counts from the vsd_data object using the assay() function and save as vsd_mat_data.
+vsd_mat_data <- assay(vsd_data)
+
+#Calculate the correlation values between samples and save to vsd_cor_data.
+vsd_cor_data <- cor(vsd_mat_data)
+
+#Plot the PCA and heatmap in 1 pdf file
+pdf(file = paste0(QC, "PCA and sample correlation.pdf"), width = 10, height = 7)
+plotPCA(vsd_data, intgroup = "condition")
+# plotPCA(rld, intgroup = "condition") # PCA with rlog. Didn't affect the results too much
+my_colors <- c("blue", "white", "red") #Define colors for the heatmap
+Heatmap(vsd_cor_data, name = "r coeff.", col = colorRampPalette(my_colors)(256))
+
+print(last_plot())
+#dev.off()
+dev.set(dev.next())
+
+```
+---
+
+##### 4c- MA plot before and after LFCshrink
+```{r}
+#Extract the unmodified DGE results from the DEseq object(dds)
+res <- results(dds)
+
+# LFCshrink using apeglm
+lfc_res<- lfcShrink(dds, type = "apeglm", coef = 2) #coef = condition... Find it using resultsNames(dds) 
+
+#MA plot before and after LFCshrink
+#pdf(file = paste0(QC, "MA_plot_LFCshrink.pdf"), width = 8, height = 4) # higher resolution with a pdf
+par(mfrow = c(1,2))
+DESeq2::plotMA(res, 
+  colLine = "red",  ylim= c(-8, 8), main = "Original")
+DESeq2::plotMA(lfc_res, 
+  colLine = "red",  ylim= c(-8, 8), main = "lfcShrink")
+#print(last_plot())
+#dev.off()
+#dev.set(dev.next())
+```
+---
+
+##### 5. Extract results, filter gene list, and save results tables
+```{r}
+#1. All DGE list
+#Use the results from lfcShrink for all downstream analysis --lfc_res
+res_all <- as.data.frame(na.omit(lfc_res)) %>% distinct() 
+
+#save the original DGE list with ensembl ids only
+write.csv(res_all, file = paste0(output,"DEgenes-all_ensembl.csv"))
+
+#Annotate the unfiltered gene list and save 
+
+#annotation database
+edb <- EnsDb.Hsapiens.v86 #shortcut for ensDB.. better at annotating genes than org.Hs.db
+
+res_all$symbol <- mapIds(edb, keys = rownames(res_all), keytype = "GENEID", column = "SYMBOL")
+#GENEID = Ensembl gene ID in EnsDB
+
+# count for any duplicate values then sort by highest count. Remove NAs
+r_count <- res_all %>% count(symbol, sort = TRUE) #n = 500/13000 genes unannotated == NAs
+res_all <- na.omit(res_all)
+r_count <- res_all %>% count(symbol, sort = TRUE)
+
+#save the annotated file of all DGE list
+write.csv(res_all, file = paste0(output,"DEgenes-all_symbol.csv"))
+
+#2. Significant DGE list 
+#Filter the genes by p value, log2FC, and baseMean
+idx = which( res_all$padj <= 0.01 & 
+             abs( res_all$log2FoldChange ) >= 1   & 
+             res_all$baseMean >= 20)
+sig_res <- res_all[idx,]
+
+#Save sig_res with only the ensembl IDs
+write.csv(sig_res, file = paste0(output,"DEgenes-sig_ens.csv"))
+
+#Annotate significant genes with gene symbol
+sig_res$symbol <- mapIds(edb, keys = rownames(sig_res), keytype = "GENEID", column = "SYMBOL")
+
+# count for any duplicate values then sort by highest count. Remove NAs
+s_count <- sig_res %>% count(symbol, sort = TRUE) #1 unmapped NA
+sig_res <- na.omit(sig_res)
+s_count <- sig_res %>% count(symbol, sort = TRUE)
+
+#save the significant DE gene with symbol 
+write.csv(sig_res, file = paste0(output,"DEgenes-sig.csv"))
+
+```
+
+---
+##### 6- Create a Volcano plot and Heatmap of DE genes
+
+```{r}
+#Enhanced volcano plot using all genes(use the df with gene symbols)
+e <- EnhancedVolcano( res_all, lab = res_all$symbol, 
+                 x = 'log2FoldChange', y = 'padj', xlab = "Log2FC", ylab = "-log10(padj)",
+                 xlim = c(-8, 8), title = "", # Centered title
+                subtitle = NULL,  # Remove the "EnhancedVolcano" subtitle
+                caption = NULL, 
+                 pCutoff = 0.01, FCcutoff = 2, pointSize = 2.0, titleLabSize = 16,
+                 labSize = 3.0,  legendPosition = "right", legendLabSize = 12, axisLabSize = 12) + labs(title = 'Senescent vs Control') + theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(color = "black"), axis.text.y = element_text(color = "black"))  # Remove the "total = ..." caption
+   # Important for centering,
+#pdf(file = paste0(out_figs, "DGE_volcano.pdf"), width = 7, height = 3.5)
+print(e)
+#dev.off()
+dev.set(dev.next())
+```
+
+```{r}
+#Create a simple heatmap of gene list
+
+#Filter the gene list for heatmap(if you need to cut down the list further)
+sig_res_hm <- sig_res[((abs(sig_res$log2FoldChange) >= 2) & sig_res$baseMean >150),]
+
+#1. normalize counts, convert to matrix, select only genes previously filtered:
+sig_counts<- counts(dds, normalized = T)[rownames(sig_res_hm),]
+
+#convert counts to z score table and add the sample names as column names
+counts.z <- t(apply(sig_counts, 1, scale))
+colnames(counts.z) <- rownames(metadata)
+
+#Create heatmap
+h<- Heatmap(counts.z, cluster_rows = T, cluster_columns = T, column_labels = colnames(counts.z),
+        name = "Z-score", row_labels = sig_res_hm[rownames(counts.z),]$symbol)
+
+#pdf(paste0(out_figs,'simple_heatmap.pdf'), width = 4, height = 8) 
+print(h)
+#dev.off()
+dev.set(dev.next())
+```
+
+```{r sessionInfo}
+sessionInfo() 
+
+```
+
+

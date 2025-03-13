@@ -1,0 +1,35 @@
+# Ignore log files
+*.log
+
+# Ignore R data and history
+.RData
+.Rhistory
+
+# Ignore RStudio project user settings
+.Rproj.user/
+
+# Ignore compiled object files
+*.o
+*.so
+
+# Ignore temporary files
+# Ignore log files
+*.log
+
+# Ignore R data and history
+.RData
+.Rhistory
+
+# Ignore RStudio project user settings
+.Rproj.user/
+
+# Ignore compiled object files
+*.o
+*.so
+
+# Ignore temporary files
+./pre-clinical-data
+./clinical-data
+
+# Ignore html files.
+*.html

@@ -1,0 +1,395 @@
+#' ---
+#' title: "Bulk RNA-seq analysis- Part 2 (clusterProfiler-GSEA)"
+#' output:
+#'   html_document:
+#'     df_print: paged
+#' editor_options:
+#'   chunk_output_type: inline
+#' ---
+#' 
+#' This analysis is based on a dataset from a published study-NCBI accession GSE171663 (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE171663). The authors studied the gene expression changes in Vascular Smooth muscle cells in response to Replicative Senescence.
+#' 
+#' In this part, we will perform Gene Set Enrichment Analysis(GSEA) using the clusterProfiler package. We will then visualize the data using various plots such as GSEA plot, ridgeplot, and heatplot(w/ clusterprofiler or ggplot packages).
+#' 
+#' ---
+#' 
+#' ##### Prerequisites - DESeq2 analysis and extraction of DEG list
+#' 
+#' ---
+#' 
+#' ##### 1. Install and load the necessary libraries
+#' 
+## ---------------------------------------------------------------------------------------------
+#install.packages("BiocManager")
+#library(BiocManager)
+#BiocManager::install("DESeq2")
+#BiocManager::install("apeglm")
+#BiocManager::install("tidyverse") # includes ggplot2 and dplyr
+#BiocManager::install("EnhancedVolcano")
+#install.packages("plotly")
+#BiocManager::install("ComplexHeatmap") #alternative = pheatmap
+#BiocManager::install( "AnnotationDbi" )
+#install.packages("devtools")
+#install.packages("Rtools")
+#BiocManager::install("EnsDb.Hsapiens.v86")
+# BiocManager::install( "clusterProfiler" )
+# BiocManager::install( "enrichplot" )
+# BiocManager::install("DOSE")
+#BiocManager::install("ReactomePA", force = TRUE)
+#BiocManager::install("msigdbr", force = TRUE)
+#BiocManager::install("KEGGREST", force = TRUE)
+# BiocManager::install("BiocUpgrade") ## you may need this
+# BiocManager::install("GOSemSim", force = TRUE)
+# install.packages("remotes")
+# library(devtools)
+# devtools::install_github("GuangchuangYu/GOSemSim")
+#install.packages(c("ggraph", "ggnetwork")) #altering ggplots 
+#devtools::install_github("datapplab/pathview")
+#update.packages(c("lattice", "spatial"))
+#install.packages("igraph")
+
+#' 
+#' 
+## ----echo=FALSE-------------------------------------------------------------------------------
+#Load libraries and set input & output paths
+library(tidyverse) # includes ggplot2, for data visualisation. dplyr, for data manipulation.
+library(RColorBrewer) # for a colourful plot
+library(ComplexHeatmap)
+library(clusterProfiler) # for PEA analysis
+library(EnsDb.Hsapiens.v86)
+library(DOSE)
+library(enrichplot) # for visualisations
+library(ggupset) # for visualisations
+library(ReactomePA)
+library(msigdbr)
+library(KEGGREST)
+library(httr2)
+library(DBI)
+library(GOSemSim)
+library(lattice)
+library(spatial)
+library(pathview)
+library(cowplot)
+library(ggridges)
+library(org.Hs.eg.db)
+#Set directory, input and output path
+getwd()
+in_path <- paste0(getwd(),"/Input/") # input path, where your input data is located
+out_path <- paste0(getwd(),"/GSEA/") # output path, where you want your results exported to
+
+
+#' 
+#' 
+#' ---#####2- Import data, convert gene names to ENTREZ ID(required for clusterProfiler)
+#' 
+## ---------------------------------------------------------------------------------------------
+#Read the data - used the DGE list that has matching symbols
+df <- read.csv(paste0(in_path, 'DEgenes-all_symbol.csv'), row.names = 1)
+#Annotate genes based on differential expression
+df <- df %>% mutate(diffexpressed = case_when(
+  log2FoldChange > 0 & padj < 0.05 ~ 'UP',
+  log2FoldChange < 0 & padj < 0.05 ~ 'DOWN',
+  padj > 0.05 ~ 'NO'
+))
+
+# Create a ranked list for GSEA analysis
+#Extract the list of genes with ensembl IDs and log2FC
+df_RL <- df[,2, drop = FALSE] %>% # drop = F prevents simplification into a vector
+  rownames_to_column(var = "ensgene") %>%
+  dplyr::rename(log2FC = log2FoldChange)
+
+slice_head(df_RL, n=10)
+#Convert Ensembl to EntrezID then extract it into a new data frame
+edb <- EnsDb.Hsapiens.v86 #shortcut to call ensembldb
+ENTREZ <- bitr(df_RL$ensgene, "GENEID", "ENTREZID", OrgDb = edb, drop = TRUE) #Alternative database would be org.Hs
+
+#Join EntrezID into the results table and rank genes based on log2FC
+df_RL_E <- df_RL %>%
+  left_join(ENTREZ, by = c("ensgene" = "GENEID")) %>%
+  dplyr::select(c(3,2)) %>%
+  arrange(desc(log2FC)) %>%
+  na.omit() %>%
+  distinct(ENTREZID, .keep_all = TRUE) #only keep the unique IDs
+
+sum(duplicated(df_RL_E)) #should equal 0 = no duplicates
+
+#write.csv(df_RL_E, file = paste0(in_path,"Ranked_ENTREZ_GSEA.csv"), row.names = F) #Input file for GSEA
+
+
+#' 
+#' ---#####3- GSEA GO analysis and visualization using gseaplot and ridgeplot
+#' 
+## ----fig.dim = c(12,8)------------------------------------------------------------------------
+#GSEA GO analysis using the ranked list
+
+#df_RL_E <- read.csv(paste0(out_path,"Ranked_ENTREZ.csv"), row.names = NULL) #Import list if needed
+
+#Convert Ranked list into a vector
+geneList <- df_RL_E$log2FC
+names(geneList) <- as.character(df_RL_E$ENTREZID)
+
+head(geneList, n =10)
+#GO analysis
+GOresults <- gseGO(
+  geneList,
+  ont = "BP",
+  org.Hs.eg.db,
+  keyType = "ENTREZID",
+  exponent = 1,
+  minGSSize = 100,
+  maxGSSize = 500,
+  eps = 0,
+  pvalueCutoff = 1,
+  pAdjustMethod = "BH",
+  verbose = TRUE,
+  seed = FALSE,
+  nPerm = 100,
+  by = "DOSE")
+
+#Create results table
+GO_gsea_BP <- GOresults@result
+
+slice_head(GO_gsea_BP, n=10)
+#Save the GO analysis output
+#saveRDS(GOresults, file = paste0(out_path,"GO/GO_BP.RDS"))
+
+#save results table
+write.csv(GO_gsea_BP, file = paste0(out_path,"GO/GO_GSEA_BP.csv"), row.names = F)
+
+#GO Plots
+#pdf(file = paste0(out_path, "GO/gseGO_BP.pdf"), width = 12, height = 8, bg = "white")
+goplot(GOresults)
+
+#' 
+## ----fig.dim = c(6,4)-------------------------------------------------------------------------
+#GSEA plots
+#pdf(file = paste0(out_path, "GO/gseaGO_BP.pdf"), width = 6, height = 4, bg = "white")
+gseaplot2(GOresults, geneSetID = 1, pvalue_table = F, title = GOresults$Description[1], base_size = 10)
+
+#' 
+## ----fig.dim = c(8,6)-------------------------------------------------------------------------
+#Ridgeplot
+#pdf(file = paste0(out_path, "GO/ridge_gseaGO_BP.pdf"), width = 8, height = 6, bg = "white")
+gr <- clusterProfiler::ridgeplot(GOresults, showCategory = 10, fill = "pvalue")
+gr_modified <- gr + labs(x = "Ranked Genes", , title = "GO_BP GSEA") + theme(plot.title = element_text(hjust = 0.5))
+print(gr_modified)
+#dev.set(which = dev.next())
+
+#You can repeat the same thing with the MF and CC GO analysis(ont = "MF" or "CC" in gseGO)
+
+
+#' 
+#' ---#####4- KEGG GSEA analysis
+#' 
+## ----fig.dim = c(12,12)-----------------------------------------------------------------------
+#GSEA KEGG analysis using the ranked list
+kk2 <- gseKEGG(geneList     = geneList,
+               organism     = 'hsa',
+               minGSSize    = 120,
+               pvalueCutoff = 0.05,
+               eps = 0,
+               verbose      = FALSE)
+head(kk2)
+
+#Extract the results and geneSets
+kk2_gsea_R <- kk2@result
+
+#Save the GSEA KEGG analysis output
+#saveRDS(kk2, file = paste0(out_path,"KEGG/KEGG_GSEA.RDS"))
+
+#Save the results table
+write.csv(kk2_gsea_R, file = paste0(out_path,"KEGG/KEGG_GSEA.csv"), row.names = F)
+
+slice_head(kk2_gsea_R, n=10)
+#Open KEGG page for pathway
+#browseKEGG(kk2, "hsa04110") #checking the KEGG pathway online
+
+#Creating a KEGG pathway plot with pathway package
+hsa04110 <- pathview(gene.data  = geneList,
+                     pathway.id = "hsa04110",
+                     species    = "hsa",
+                     limit      = list(gene=max(abs(geneList)), cpd=1), 
+                     res = 300, 
+                     key.align = "x", key.font.size = 5,
+                     key.pos = "bottomright")
+
+#Have to manually move the file to your target directory
+
+
+#' 
+#' ---#####5- WikiPathways GSEA analysis and visualization (GSEAplot, ridgeplot, dotplot, heatplot) -->
+## ----fig.dim = c(6,4)-------------------------------------------------------------------------
+###Wikipathways GSEA analysis 
+WP_gsea <- gseWP(geneList, 
+                 organism = "Homo sapiens", 
+                 minGSSize    = 100,
+               pvalueCutoff = 1,
+               eps = 0,
+               by = "DOSE",
+               nPerm = 100)
+
+
+WP_gsea_R <- WP_gsea@result
+
+slice_head(WP_gsea_R, n=10)
+#Save all GSEA output
+#saveRDS(WP_gsea, file = paste0(out_path,"Wikipathways/WP_gsea.RDS"))
+
+#save the results file
+#write.csv(WP_gsea_R, file = paste0(out_path,"Wikipathways/Wikipathways_GSEA.csv"), row.names = F)
+
+#GSEA plot
+pdf(file = paste0(out_path, "Wikipathways/WP_GSEA.pdf"), width = 6, height = 4, bg = "white")
+wp_gs <- gseaplot2(WP_gsea, geneSetID = 1, pvalue_table = F, title = WP_gsea$Description[1], base_size = 10)
+print(wp_gs)
+
+#dev.set(which = dev.next())
+
+#' 
+## ----fig.dim = c(6,6)-------------------------------------------------------------------------
+#Ridgeplot
+pdf(file = paste0(out_path, "Wikipathways/ridge_WP_GSEA.pdf"), width = 8, height = 6, bg = "white")
+wr <- clusterProfiler::ridgeplot(WP_gsea, showCategory = 10, fill = "pvalue")
+wr_modified <- wr + labs(x = "Ranked Genes", , title = "WikiPathways GSEA") + theme(plot.title = element_text(hjust = 0.5))
+print(wr_modified)
+dev.set(which = dev.next())
+
+#Dotplot 
+pdf(file = paste0(out_path, "Wikipathways/dot_WP_GSEA.pdf"), width = 6, height = 6, bg = "white")
+wd <- clusterProfiler::dotplot(WP_gsea, x = "GeneRatio", color = "pvalue", size = "setSize", title = "WikiPathways GSEA", showCategory = 10)
+
+wd_modified <- wd + ggtitle("WikiPathways GSEA") +
+  scale_color_gradient(low = "blue", high = "red") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+print(wd_modified)
+#dev.set(which = dev.next())
+
+
+#' 
+## ----fig.dim = c(30,8)------------------------------------------------------------------------
+#Heatplot
+
+## convert gene IDs in GSEA output to Symbol
+WPx<- setReadable(WP_gsea, 'org.Hs.eg.db', 'ENTREZID')
+
+
+#Create a vector with logFC with names as ENTREZ from the gene List
+#Function to create geneList with FC vector from unfiltered genes with FC list
+geneList_vec_E <- function(x){
+  logFC <- x$log2FC
+  names(logFC) <- x$ENTREZID
+  return(logFC)
+}
+
+#Convert genelist into symbol list from entrez and extract into a vector(all unfiltered genes)
+#Check keytypes in org.Hs.eg.db- keytypes(org.Hs.eg.db)
+geneList_vec_S <- function(x){
+  EID <-as.character(x$ENTREZID) #Character vector with ENTREZID for mapping
+  x$SYMBOL <-mapIds(org.Hs.eg.db, keys = EID, keytype = "ENTREZID", column = "SYMBOL", multiVals = "first") 
+  logFC <- x$log2FC
+  names(logFC) <- x$SYMBOL
+  logFC <- logFC[!is.na(names(logFC))]
+  return(logFC)
+}
+
+geneList_E <- geneList_vec_E(df_RL_E)
+geneList_S <- geneList_vec_S(df_RL_E)
+
+head(geneList_S, n=10)
+#pdf(file = paste0(out_path, "Wikipathways/heat_WP_GSEA.pdf"), width = 35, height = 10, bg = "white")
+p8 <- heatplot(WPx, foldChange=geneList_S, symbol = "dot", showCategory=5) + viridis::scale_fill_viridis(name = "log2FC")
+
+p8_modified <- p8 + ggtitle("WikiPathways GSEA") +
+  theme(plot.title = element_text(hjust = 0.5))
+print(p8_modified)
+#dev.set(which = dev.next())
+
+
+#Heatplot with subsets of genes(up or down)
+# up <- sort(geneList_S, decreasing = TRUE)[1:30]
+# geneList_UP <- geneList_S[up]
+# p9 <- heatplot(WPx, foldChange=geneList_UP, symbol = "dot", showCategory=4) + viridis::scale_fill_viridis(name = "log2FC")
+
+# p9_modified <- p9 + ggtitle("WikiPathways GSEA") +
+#   theme(plot.title = element_text(hjust = 0.5))
+# print(p9_modified)
+
+#down genes
+# dn <- sort(geneList_S, decreasing = FALSE)[1:30]
+# geneList_dn <- geneList_S[dn]
+
+
+#' 
+#' ---#####6- Reactome GSEA analysis and visualization (GSEAplot, ridgeplot, dotplot, heatplot)
+## ---------------------------------------------------------------------------------------------
+##Reactome GSEA analysis
+RC_gsea <- gsePathway(geneList, 
+                 organism = "human", 
+                 minGSSize    = 100,
+               pvalueCutoff = 1,
+               eps = 0,
+               by = "DOSE",
+               nPerm = 100)
+
+#Extract results table
+RC_gsea_R <- RC_gsea@result
+
+slice_head(RC_gsea_R, n=10)
+#Save Reactome GSEA output
+#saveRDS(RC_gsea, file = paste0(out_path,"Reactome/Reactome_gsea.RDS"))
+
+#save Reactome results file
+write.csv(RC_gsea@result, file = paste0(out_path,"Reactome/Reactome_GSEA.csv"), row.names = F)
+
+
+#' 
+## ----fig.dim = c(6,6)-------------------------------------------------------------------------
+#GSEA plot
+#pdf(file = paste0(out_path, "Reactome/RC_GSEA.pdf"), width = 6, height = 4, bg = "white")
+rc_gs <- gseaplot2(RC_gsea, geneSetID = 1, pvalue_table = F, title = RC_gsea$Description[1], base_size = 10)
+print(rc_gs)
+
+# dev.set(which = dev.next())
+# dev.off()
+#Ridgeplot
+#pdf(file = paste0(out_path, "Reactome/ridge_RC_GSEA.pdf"), width = 8, height = 6, bg = "white")
+rr <- clusterProfiler::ridgeplot(RC_gsea, showCategory = 10, fill = "pvalue")
+rr_modified <- rr + labs(x = "Ranked Genes", , title = "Reactome GSEA") + theme(plot.title = element_text(hjust = 0.5))
+print(rr_modified)
+#dev.set(which = dev.next())
+
+#Dotplot 
+pdf(file = paste0(out_path, "Reactome/dot_RC_GSEA.pdf"), width = 6, height = 6, bg = "white")
+rd <- clusterProfiler::dotplot(RC_gsea, x = "GeneRatio", color = "pvalue", size = "setSize", title = "Reactome GSEA", showCategory = 10)
+
+rd_modified <- rd + ggtitle("Reactome GSEA") +
+  scale_color_gradient(low = "blue", high = "red") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+print(rd_modified)
+#dev.set(which = dev.next())
+
+#' 
+## ----fig.dim = c(30,8)------------------------------------------------------------------------
+#Heatplot
+
+## convert gene IDs in GSEA output to Symbol
+RCx<- setReadable(RC_gsea, 'org.Hs.eg.db', 'ENTREZID')
+
+#pdf(file = paste0(out_path, "Reactome/heat_RC_GSEA.pdf"), width = 35, height = 10, bg = "white")
+p8 <- heatplot(RCx, foldChange=geneList_S, symbol = "dot", showCategory=5) + viridis::scale_fill_viridis(name = "log2FC")
+
+p8_modified <- p8 + ggtitle("Reactome GSEA") +
+  theme(plot.title = element_text(hjust = 0.5))
+print(p8_modified)
+#dev.set(which = dev.next())
+
+
+#' 
+## ----sessionInfo------------------------------------------------------------------------------
+sessionInfo() 
+
+
+#' 
+#' 
